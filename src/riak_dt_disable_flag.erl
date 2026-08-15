@@ -31,9 +31,12 @@
 
 -export([new/0, value/1, value/2, update/3, merge/2, equal/2, from_binary/1, to_binary/1, stats/1, stat/2]).
 -export([update/4, parent_clock/2]).
+-export([to_binary/2]).
+-export([to_version/2]).
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -export([gen_op/0, init_state/0, update_expected/3, eqc_state_value/1]).
+-export([prop_crdt_converge/0]).
 -endif.
 
 -ifdef(TEST).
@@ -81,19 +84,33 @@ equal(FA,FB) ->
 parent_clock(_Clock, Flag) ->
     Flag.
 
--spec from_binary(binary()) -> disable_flag().
-from_binary(<<?TAG:7, 0:1>>) -> off;
-from_binary(<<?TAG:7, 1:1>>) -> on.
+-spec from_binary(binary()) -> {ok, disable_flag()} | ?INVALID_BINARY | ?UNSUPPORTED_VERSION.
+from_binary(<<?TAG:7, 0:1>>) -> {ok, off};
+from_binary(<<?TAG:7, 1:1>>) -> {ok, on};
+from_binary(_Bin) -> ?INVALID_BINARY.
 
 -spec to_binary(disable_flag()) -> binary().
 to_binary(off) -> <<?TAG:7, 0:1>>;
 to_binary(on) -> <<?TAG:7, 1:1>>.
+
+-spec to_binary(Vers :: pos_integer(), disable_flag()) ->
+                       {ok, binary()} | ?UNSUPPORTED_VERSION.
+to_binary(1, Flag) ->
+    B = to_binary(Flag),
+    {ok, B};
+to_binary(Vers, _Flag) ->
+    ?UNSUPPORTED_VERSION(Vers).
 
 -spec stats(disable_flag()) -> [{atom(), number()}].
 stats(_) -> [].
 
 -spec stat(atom(), disable_flag()) -> number() | undefined.
 stat(_, _) -> undefined.
+
+-spec to_version(pos_integer(), disable_flag()) -> disable_flag().
+to_version(_Version, Flag) ->
+    Flag.
+
 
 %% priv
 flag_and(on, on) ->
@@ -103,16 +120,10 @@ flag_and(off, _) ->
 flag_and(_, off) ->
     off.
 
-
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
 -ifdef(TEST).
-
--ifdef(EQC).
-eqc_value_test_() ->
-    crdt_statem_eqc:run(?MODULE, 1000).
--endif.
 
 new_test() ->
     ?assertEqual(on, new()).
@@ -158,6 +169,10 @@ stat_test() ->
 
 %% EQC generator
 -ifdef(EQC).
+
+prop_crdt_converge() ->
+    crdt_statem_eqc:prop_converge(?MODULE).
+
 init_state() ->
     on.
 

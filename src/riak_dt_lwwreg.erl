@@ -1,6 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% riak_dt_lwwreg: A DVVSet based last-write-wins register
+%% riak_dt_lwwreg: A last-write-wins register
 %%
 %% Copyright (c) 2007-2013 Basho Technologies, Inc.  All Rights Reserved.
 %%
@@ -34,11 +34,14 @@
 -export([new/0, value/1, value/2, update/3, merge/2,
          equal/2, to_binary/1, from_binary/1, stats/1, stat/2]).
 -export([parent_clock/2, update/4]).
+-export([to_binary/2]).
+-export([to_version/2]).
 
 %% EQC API
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -export([gen_op/0, gen_op/1, update_expected/3, eqc_state_value/1, init_state/0, generate/0]).
+-export([prop_crdt_converge/0, prop_crdt_bin_roundtrip/0]).
 -endif.
 
 -ifdef(TEST).
@@ -139,19 +142,35 @@ stat(_, _) -> undefined.
 to_binary(LWWReg) ->
     <<?TAG:8/integer, ?V1_VERS:8/integer, (riak_dt:to_binary(LWWReg))/binary>>.
 
+-spec to_binary(Vers :: pos_integer(), lwwreg()) -> {ok, binary()} | ?UNSUPPORTED_VERSION.
+to_binary(1, LWW) ->
+    {ok, to_binary(LWW)};
+to_binary(Vers, _LWW) ->
+    ?UNSUPPORTED_VERSION(Vers).
+
 %% @doc Decode binary `lwwreg()'
--spec from_binary(binary()) -> lwwreg().
+-spec from_binary(binary()) -> {ok, lwwreg()} | ?UNSUPPORTED_VERSION | ?INVALID_BINARY.
 from_binary(<<?TAG:8/integer, ?V1_VERS:8/integer, Bin/binary>>) ->
-    riak_dt:from_binary(Bin).
+    {ok, riak_dt:from_binary(Bin)};
+from_binary(<<?TAG:8/integer, Vers:8/integer, _Bin/binary>>) ->
+    ?UNSUPPORTED_VERSION(Vers);
+from_binary(_B) ->
+    ?INVALID_BINARY.
+
+-spec to_version(pos_integer(), lwwreg()) -> lwwreg().
+to_version(_Version, LWW) ->
+    LWW.
 
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
--ifdef(TEST).
 
 -ifdef(EQC).
-eqc_value_test_() ->
-    crdt_statem_eqc:run(?MODULE, 1000).
+prop_crdt_converge() ->
+     crdt_statem_eqc:prop_converge(?MODULE).
+
+prop_crdt_bin_roundtrip() ->
+    crdt_statem_eqc:prop_bin_roundtrip(?MODULE).
 
 %% EQC generator
 generate() ->
@@ -184,6 +203,7 @@ eqc_state_value({Val, _TS}) ->
     Val.
 -endif.
 
+-ifdef(TEST).
 new_test() ->
     ?assertEqual({<<>>, 0}, new()).
 
@@ -231,7 +251,7 @@ roundtrip_bin_test() ->
     {ok, LWW3} = update({assign, 89}, a3, LWW2),
     {ok, LWW4} = update({assign, <<"this is a binary">>}, a4, LWW3),
     Bin = to_binary(LWW4),
-    Decoded = from_binary(Bin),
+    {ok, Decoded} = from_binary(Bin),
     ?assert(equal(LWW4, Decoded)).
 
 query_test() ->
@@ -241,9 +261,11 @@ query_test() ->
 
 stat_test() ->
     LWW = new(),
+    NewSize = erlang:external_size(<<>>),
+    UpdateSize = erlang:external_size(<<"abcd">>),
     {ok, LWW1} = update({assign, <<"abcd">>}, 1, LWW),
-    ?assertEqual([{value_size, 11}], stats(LWW)),
-    ?assertEqual([{value_size, 15}], stats(LWW1)),
-    ?assertEqual(15, stat(value_size, LWW1)),
+    ?assertEqual([{value_size, NewSize}], stats(LWW)),
+    ?assertEqual([{value_size, UpdateSize}], stats(LWW1)),
+    ?assertEqual(UpdateSize, stat(value_size, LWW1)),
     ?assertEqual(undefined, stat(actor_count, LWW1)).
 -endif.

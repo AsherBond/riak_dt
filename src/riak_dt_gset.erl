@@ -3,7 +3,7 @@
 %%
 %% riak_dt_gset: A convergent, replicated, state based grow only set
 %%
-%% Copyright (c) 2007-2012 Basho Technologies, Inc.  All Rights Reserved.
+%% Copyright (c) 2007-2016 Basho Technologies, Inc.  All Rights Reserved.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -37,6 +37,8 @@
 -export([new/0, value/1, update/3, merge/2, equal/2,
          to_binary/1, from_binary/1, value/2, stats/1, stat/2]).
 -export([update/4, parent_clock/2]).
+-export([to_binary/2]).
+-export([to_version/2]).
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
@@ -49,6 +51,7 @@
 %% EQC API
 -ifdef(EQC).
 -export([init_state/0, gen_op/0, update_expected/3, eqc_state_value/1]).
+-export([prop_crdt_converge/0]).
 -endif.
 
 -export_type([gset/0, binary_gset/0, gset_op/0]).
@@ -56,7 +59,7 @@
 
 -type binary_gset() :: binary(). %% A binary that from_binary/1 will operate on.
 
--type gset_op() :: {add, member()}.
+-type gset_op() :: {add, member()} | {add_all, members()}.
 
 -type actor() :: riak_dt:actor().
 
@@ -76,10 +79,21 @@ value(GSet) ->
 value(_, GSet) ->
     value(GSet).
 
+-spec apply_ops([gset_op()], actor(),  gset()) ->
+                       {ok, gset()}.
+apply_ops([], _Actor, GSet) ->
+    {ok, GSet};
+apply_ops([Op | Rest], Actor, GSet) ->
+    {ok, GSet2} =  update(Op, Actor, GSet),
+    apply_ops(Rest, Actor, GSet2).
 
 -spec update(gset_op(), actor(), gset()) -> {ok, gset()}.
 update({add, Elem}, _Actor, GSet) ->
     {ok, ordsets:add_element(Elem, GSet)};
+
+update({update, Ops}, _Actor, GSet) ->
+apply_ops(Ops,_Actor,GSet);
+
 update({add_all, Elems}, _Actor, GSet) ->
     {ok, ordsets:union(GSet, ordsets:from_list(Elems))}.
 
@@ -103,16 +117,31 @@ equal(GSet1, GSet2) ->
 -include("riak_dt_tags.hrl").
 -define(TAG, ?DT_GSET_TAG).
 -define(V1_VERS, 1).
+-define(V2_VERS, 2).
 
 -spec to_binary(gset()) -> binary_gset().
 to_binary(GSet) ->
-    %% @TODO something smarter
-    <<?TAG:8/integer, ?V1_VERS:8/integer, (term_to_binary(GSet))/binary>>.
+    %%<<?TAG:8/integer, ?V1_VERS:8/integer, (riak_dt:to_binary(GSet))/binary>>.
+    {ok, B} = to_binary(?V2_VERS, GSet),
+    B.
 
--spec from_binary(binary()) -> gset().
+-spec to_binary(Vers :: pos_integer(), gset()) -> {ok, binary()} | ?UNSUPPORTED_VERSION.
+to_binary(?V1_VERS, S) ->
+    {ok, <<?TAG:8/integer, ?V1_VERS:8/integer, (riak_dt:to_binary(S))/binary>>};
+to_binary(?V2_VERS, S) ->
+    {ok, <<?TAG:8/integer, ?V2_VERS:8/integer, (riak_dt:to_binary(S))/binary>>};
+to_binary(Vers, _S0) ->
+    ?UNSUPPORTED_VERSION(Vers).
+
+-spec from_binary(binary()) -> {ok, gset()} | ?UNSUPPORTED_VERSION | ?INVALID_BINARY.
 from_binary(<<?TAG:8/integer, ?V1_VERS:8/integer, Bin/binary>>) ->
-    %% @TODO something smarter
-    binary_to_term(Bin).
+    {ok, riak_dt:from_binary(Bin)};
+from_binary(<<?TAG:8/integer, ?V2_VERS:8/integer, Bin/binary>>) ->
+    {ok, riak_dt:from_binary(Bin)};
+from_binary(<<?TAG:8/integer, Vers:8/integer, _Bin/binary>>) ->
+    ?UNSUPPORTED_VERSION(Vers);
+from_binary(_B) ->
+    ?INVALID_BINARY.
 
 -spec stats(gset()) -> [{atom(), number()}].
 stats(GSet) ->
@@ -128,6 +157,9 @@ stat(max_element_size, GSet) ->
       end, 0, GSet);
 stat(_, _) -> undefined.
 
+-spec to_version(pos_integer(), gset()) -> gset().
+to_version(_Version, Set) ->
+    Set.
 
 %% ===================================================================
 %% EUnit tests
@@ -137,15 +169,22 @@ stat(_, _) -> undefined.
 stat_test() ->
     S0 = new(),
     {ok, S1} = update({add_all, [<<"a">>, <<"b1">>, <<"c23">>, <<"d234">>]}, 1, S0),
+    MaxElementSize = erlang:external_size(<<"d234">>),
     ?assertEqual([{element_count, 0}, {max_element_size, 0}], stats(S0)),
-    ?assertEqual([{element_count, 4}, {max_element_size, 15}], stats(S1)),
+    ?assertEqual([{element_count, 4}, {max_element_size, MaxElementSize}], stats(S1)),
     ?assertEqual(4, stat(element_count, S1)),
-    ?assertEqual(15, stat(max_element_size, S1)),
+    ?assertEqual(MaxElementSize, stat(max_element_size, S1)),
     ?assertEqual(undefined, stat(actor_count, S1)).
 
+to_binary_test() ->
+  GSet = update({add, <<"foo">>}, undefined_actor, riak_dt_gset:new()),
+  Bin = riak_dt_gset:to_binary(GSet),
+  ?assertMatch( <<82:8/integer, ?V2_VERS:8/integer, _/binary>> , Bin).
+-endif.
+
 -ifdef(EQC).
-eqc_value_test_() ->
-    crdt_statem_eqc:run(?MODULE, 1000).
+prop_crdt_converge() ->
+    crdt_statem_eqc:prop_converge(?MODULE).
 
 %% EQC generator
 gen_op() ->
@@ -177,7 +216,5 @@ eqc_state_value(Dict) ->
                   sets:new(),
                   Dict),
     sets:to_list(S).
-
--endif.
 
 -endif.
